@@ -1,32 +1,45 @@
 package configs
 
 import (
-	"github.com/spf13/viper"
+	"os"
+	"strconv"
+	"time"
+
+	"github.com/joho/godotenv"
 )
 
 type Config struct {
-	DBPassword string `mapstructure:"DB_PASSWORD"`
-	Limit      int    `mapstructure:"LIMIT"`
+	DBPassword           string
+	RateLimit            int
+	RateLimiterWindow    time.Duration
+	RateLimiterBlockTime time.Duration
 }
 
-func LoadConfig(path string) (*Config, error) {
-	var cfg *Config
-	viper.SetConfigName("app_config")
-	viper.SetConfigType("env")
-	viper.AddConfigPath(path)
-	viper.SetConfigFile(".env")
-	viper.AutomaticEnv()
-	
-	viper.SetDefault("LIMIT", 10)
-	
-	err := viper.ReadInConfig()
+func LoadConfig() (*Config, error) {
+	err := godotenv.Load()
 	if err != nil {
-		panic(err)
+		return nil, err
 	}
-	err = viper.Unmarshal(&cfg)
+
+	limit, err := strconv.Atoi(os.Getenv("RATE_LIMIT"))
 	if err != nil {
-		panic(err)
+		limit = 10
 	}
-	
-	return cfg, err
+
+	window, err := time.ParseDuration(os.Getenv("RATE_LIMITER_WINDOW"))
+	if err != nil {
+		window = 1 * time.Second
+	}
+
+	blockTime, err := time.ParseDuration(os.Getenv("RATE_LIMITER_BLOCK_TIME"))
+	if err != nil {
+		blockTime = 1 * time.Minute
+	}
+
+	return &Config{
+		DBPassword:           os.Getenv("DB_PASSWORD"),
+		RateLimit:            limit,
+		RateLimiterWindow:    window,
+		RateLimiterBlockTime: blockTime,
+	}, nil
 }
