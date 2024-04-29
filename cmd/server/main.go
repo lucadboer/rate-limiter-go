@@ -2,13 +2,14 @@ package main
 
 import (
 	"fmt"
+	"net/http"
+
 	"github.com/go-chi/chi"
 	"github.com/go-chi/chi/middleware"
 	"github.com/go-redis/redis/v8"
 	configs "github.com/lucadboer/posgo/rate-limiter/config"
-	"github.com/lucadboer/posgo/rate-limiter/internal/http/middlewares"
+	"github.com/lucadboer/posgo/rate-limiter/internal/infra/http/middlewares"
 	"github.com/lucadboer/posgo/rate-limiter/internal/infra/storage"
-	"net/http"
 )
 
 func main() {
