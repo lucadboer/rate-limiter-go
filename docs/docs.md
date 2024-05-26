@@ -8,8 +8,8 @@ O rate limiter utiliza um armazenamento externo (por exemplo, Redis) para rastre
 
 ### Componentes Principais
 
-- **StorageLimiter**: É a estrutura central que implementa a lógica do rate limiter. Ela mantém a configuração do limite de requisições, a janela de tempo e a interface para o armazenamento de dados.
-- **MiddlewareRate**: Um middleware HTTP que utiliza o `StorageLimiter` para verificar e limitar as requisições recebidas.
+- **RateLimiter**: É a estrutura central que implementa a lógica do rate limiter. Ela mantém a configuração do limite de requisições, a janela de tempo e a interface para o armazenamento de dados.
+- **RateLimiterMiddleware**: Um middleware HTTP que utiliza o `RateLimiter` para verificar e limitar as requisições recebidas.
 
 ### Chave de Identificação
 
@@ -25,20 +25,49 @@ O rate limiter utiliza um armazenamento externo (por exemplo, Redis) para rastre
 
 Para configurar o rate limiter, você precisa definir o limite de requisições, a janela de tempo e configurar o armazenamento de dados.
 
-### Criando um StorageLimiter
+### Criando um RateLimiter
 
 ```go
-storage := // inicialize seu armazenamento aqui, por exemplo, uma instância Redis
-limit := 100 // limite de 100 requisições
-window := time.Minute // janela de tempo de 1 minuto
+import (
+    "time"
+    "github.com/go-redis/redis/v8"
+    "rate-limiter/limiter"
+)
 
-limiter := ratelimiter.NewStorageLimiter(storage, limit, window)
+func main() {
+    redisClient := redis.NewClient(&redis.Options{
+        Addr: "localhost:6379",
+    })
+
+    limit := 100 // limite de 100 requisições
+    window := time.Minute // janela de tempo de 1 minuto
+
+    limiter := limiter.NewRateLimiter("localhost", "6379", limit, limit, int(window.Seconds()))
+}
 ```
 
 ### Adicionando o Middleware ao Servidor HTTP
 
 ```go
-http.Handle("/", MiddlewareRate(limiter)(http.HandlerFunc(handler)))
+import (
+    "net/http"
+    "rate-limiter/middleware"
+)
+
+func main() {
+    // Inicialize o RateLimiter conforme mostrado acima
+    // ...
+
+    middleware := middleware.NewRateLimiterMiddleware(limiter)
+
+    http.Handle("/", middleware.Middleware(http.HandlerFunc(handler)))
+    log.Println("Server running on port 8080")
+    log.Fatal(http.ListenAndServe(":8080", nil))
+}
+
+func handler(w http.ResponseWriter, r *http.Request) {
+    w.Write([]byte("Welcome to the rate limited server!"))
+}
 ```
 
 Substitua `handler` pela função que lida com suas requisições HTTP.
@@ -46,7 +75,7 @@ Substitua `handler` pela função que lida com suas requisições HTTP.
 ### Ajustando Limites por IP e Token
 
 - O limite padrão se aplica a identificações baseadas em endereço IP.
-- Para configurar limites específicos para tokens de acesso, você pode ajustar a lógica dentro do `MiddlewareRate` ou gerenciar diferentes instâncias do `StorageLimiter` com configurações distintas para diferentes tokens.
+- Para configurar limites específicos para tokens de acesso, você pode ajustar a lógica dentro do `RateLimiter` ou gerenciar diferentes instâncias do `RateLimiter` com configurações distintas para diferentes tokens.
 
 ## Considerações
 
