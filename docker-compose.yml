@@ -4,3 +4,12 @@ services:
     image: "redis:alpine"
     ports:
       - "6379:6379"
+
+  rate-limiter-app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: rate-limiter-app:latest
+    container_name: rate-limiter-app
+    ports:
+      - "8080:8080"
