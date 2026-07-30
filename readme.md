@@ -1,85 +1,82 @@
-# Rate Limiter
+# rate-limiter-go
 
-O Rate Limiter implementado em Go é uma ferramenta eficaz para controlar o tráfego de requisições a um serviço web, limitando o número de requisições permitidas por segundo com base no endereço IP do solicitante ou em um token de acesso específico. Este documento fornece uma visão geral de como o rate limiter funciona e como ele pode ser configurado.
+HTTP rate limiting middleware for Go services, keyed by **API token when present and by client IP
+otherwise**, with counter state kept outside the process so it holds across replicas.
 
-## Funcionamento
+## The problem
 
-O rate limiter utiliza um armazenamento externo (por exemplo, Redis) para rastrear o número de requisições feitas por um identificador único (endereço IP ou token de acesso) dentro de uma janela de tempo definida. Quando uma requisição é recebida, o rate limiter verifica se o limite de requisições para aquele identificador já foi alcançado. Se o limite não foi alcançado, a requisição é permitida; caso contrário, é negada.
+An in-memory rate limiter breaks the moment you run more than one instance — each replica keeps its
+own count, so the effective limit becomes `limit × replicas`. This keeps counters in Redis behind a
+narrow interface, so the limit is global and the backing store is replaceable.
 
-### Componentes Principais
+## How the limit is chosen
 
-- **RateLimiter**: É a estrutura central que implementa a lógica do rate limiter. Ela mantém a configuração do limite de requisições, a janela de tempo e a interface para o armazenamento de dados.
-- **RateLimiterMiddleware**: Um middleware HTTP que utiliza o `RateLimiter` para verificar e limitar as requisições recebidas.
+The middleware reads the `API_KEY` request header:
 
-### Chave de Identificação
+- **Header present** → limit by token, using `RATE_LIMIT_TOKEN`.
+- **Header absent** → limit by IP, using `RATE_LIMIT_IP`.
 
-- Para cada requisição, o rate limiter determina uma chave de identificação baseada no endereço IP do solicitante ou no token de acesso, se fornecido.
-- Se um token de acesso é fornecido no cabeçalho `API_KEY`, o rate limiter usa esse token como chave; caso contrário, usa o endereço IP.
+Token limits deliberately win over IP limits, so an authenticated caller behind a shared NAT is not
+throttled by its neighbours. Over the limit returns **HTTP 429**.
 
-### Limitação e Janela de Tempo
+## Stack
 
-- O rate limiter permite configurar um limite de requisições (`limit`) e uma janela de tempo (`window`) durante a qual esse limite se aplica.
-- Quando o limite de requisições para uma chave específica é alcançado dentro da janela de tempo, novas requisições com essa chave são negadas até que a janela de tempo seja reiniciada.
+Go · go-redis/v8 · Redis · testify · Docker Compose
 
-## Configuração
+## Running it
 
-Para configurar o rate limiter, você precisa definir o limite de requisições, a janela de tempo e configurar o armazenamento de dados.
-
-### Criando um RateLimiter
-
-```go
-import (
-    "time"
-    "github.com/go-redis/redis/v8"
-    "rate-limiter/limiter"
-)
-
-func main() {
-    redisClient := redis.NewClient(&redis.Options{
-        Addr: "localhost:6379",
-    })
-
-    limit := 100 // limite de 100 requisições
-    window := time.Minute // janela de tempo de 1 minuto
-
-    limiter := limiter.NewRateLimiter("localhost", "6379", limit, limit, int(window.Seconds()))
-}
+```bash
+docker compose up -d     # Redis on 6379
+go run .                 # server on :8080
 ```
 
-### Adicionando o Middleware ao Servidor HTTP
+Configuration comes from `.env` (committed — local values only):
 
-```go
-import (
-    "net/http"
-    "rate-limiter/middleware"
-)
+| Variable | Meaning |
+|---|---|
+| `REDIS_HOST`, `REDIS_PORT` | Redis address |
+| `RATE_LIMIT_IP` | requests allowed per IP per window |
+| `RATE_LIMIT_TOKEN` | requests allowed per token per window |
+| `BLOCK_DURATION` | window length in seconds |
 
-func main() {
-    // Inicialize o RateLimiter conforme mostrado acima
-    // ...
+Trip the IP limit with the committed defaults (10 per 300s):
 
-    middleware := middleware.NewRateLimiterMiddleware(limiter)
+```bash
+for i in $(seq 1 12); do curl -s -o /dev/null -w "%{http_code}\n" http://localhost:8080/; done
+# ten 200s, then 429s
 
-    http.Handle("/", middleware.Middleware(http.HandlerFunc(handler)))
-    log.Println("Server running on port 8080")
-    log.Fatal(http.ListenAndServe(":8080", nil))
-}
-
-func handler(w http.ResponseWriter, r *http.Request) {
-    w.Write([]byte("Welcome to the rate limited server!"))
-}
+curl -H 'API_KEY: my-token' http://localhost:8080/     # counted against the token budget instead
 ```
 
-Substitua `handler` pela função que lida com suas requisições HTTP.
+## Tests
 
-### Ajustando Limites por IP e Token
+```bash
+docker compose up -d     # the tests talk to a real Redis on localhost:6379
+go test ./...
+```
 
-- O limite padrão se aplica a identificações baseadas em endereço IP.
-- Para configurar limites específicos para tokens de acesso, você pode ajustar a lógica dentro do `RateLimiter` ou gerenciar diferentes instâncias do `RateLimiter` com configurações distintas para diferentes tokens.
+`limiter/limiter_test.go` covers the IP and token paths. It calls `FlushAll` on setup and sleeps past
+the window to assert the counter resets, so a full run takes ~20s.
 
-## Considerações
+## Technical decisions worth noting
 
-- A eficácia do rate limiter em ambientes de alta carga depende da configuração e do desempenho do armazenamento de dados.
-- É importante monitorar e ajustar a configuração do rate limiter com base no padrão de tráfego do seu serviço web para evitar falsos positivos ou negativos na limitação de requisições.
+**`Store` is a two-method interface** (`Incr`, `Expire`) declared in `limiter/store.go`. `RedisStore`
+is the only implementation; swapping in Memcached or an in-memory store for tests means implementing
+two methods and changing one line in `main.go`. The limiter itself never imports a Redis package.
 
-Este documento fornece uma visão geral de como configurar e utilizar o rate limiter em sua aplicação Go. A implementação pode ser ajustada conforme necessário para atender às necessidades específicas do seu serviço web.
+**The window is set by the first request, not renewed per hit.** `Incr` returns the new count, and
+only when it comes back `1` does the limiter call `Expire`. That makes it a fixed window: the TTL is
+attached once and the counter dies with it, so a caller cannot extend their own block by continuing
+to hammer the endpoint.
+
+**Store errors fail closed.** If Redis is unreachable, `isRateLimited` returns `true` and the request
+is rejected. The tradeoff is deliberate — a Redis outage degrades into refusing traffic rather than
+silently removing every limit.
+
+## Notes
+
+Course challenge from the Full Cycle Go post-graduate program, kept public as a code sample.
+
+## License
+
+MIT
